@@ -38,7 +38,23 @@
   padding: 0;
   font-family: Arial, sans-serif;
 }
+.announcement-banner {
+  background-color: #4caf50;
+  color: white;
+  text-align: center;
+  padding: 15px;
+  font-weight: bold;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  font-size: 1rem;
+}
 
+@media (max-width: 600px) {
+  .announcement-banner {
+    padding: 10px;
+    font-size: 0.9rem;
+  }
+}
 body {
   font-family: Arial, sans-serif;
   line-height: 1.4;
