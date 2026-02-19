@@ -3,13 +3,128 @@ MongoDB database configuration and setup for Mergington High School API
 """
 
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 from argon2 import PasswordHasher, exceptions as argon2_exceptions
+from copy import deepcopy
 
-# Connect to MongoDB
-client = MongoClient('mongodb://localhost:27017/')
-db = client['mergington_high']
-activities_collection = db['activities']
-teachers_collection = db['teachers']
+
+class _UpdateResult:
+    def __init__(self, modified_count: int):
+        self.modified_count = modified_count
+
+
+def _get_nested_value(document, path):
+    value = document
+    for part in path.split('.'):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def _matches_query(document, query):
+    if not query:
+        return True
+
+    for key, condition in query.items():
+        value = _get_nested_value(document, key)
+
+        if isinstance(condition, dict):
+            if "$in" in condition:
+                if not isinstance(value, list):
+                    return False
+                if not any(item in value for item in condition["$in"]):
+                    return False
+
+            if "$gte" in condition and (value is None or value < condition["$gte"]):
+                return False
+
+            if "$lte" in condition and (value is None or value > condition["$lte"]):
+                return False
+        else:
+            if value != condition:
+                return False
+
+    return True
+
+
+class InMemoryCollection:
+    def __init__(self):
+        self._documents = {}
+
+    def count_documents(self, query):
+        return sum(1 for _ in self.find(query))
+
+    def insert_one(self, document):
+        doc = deepcopy(document)
+        self._documents[doc["_id"]] = doc
+
+    def find(self, query=None):
+        query = query or {}
+        for document in self._documents.values():
+            if _matches_query(document, query):
+                yield deepcopy(document)
+
+    def find_one(self, query):
+        for document in self.find(query):
+            return document
+        return None
+
+    def update_one(self, query, update):
+        target_id = query.get("_id")
+        if target_id not in self._documents:
+            return _UpdateResult(modified_count=0)
+
+        document = self._documents[target_id]
+        modified = 0
+
+        if "$push" in update:
+            for field, value in update["$push"].items():
+                if field not in document or not isinstance(document[field], list):
+                    document[field] = []
+                if value not in document[field]:
+                    document[field].append(value)
+                    modified = 1
+
+        if "$pull" in update:
+            for field, value in update["$pull"].items():
+                if field in document and isinstance(document[field], list):
+                    original_len = len(document[field])
+                    document[field] = [item for item in document[field] if item != value]
+                    if len(document[field]) != original_len:
+                        modified = 1
+
+        return _UpdateResult(modified_count=modified)
+
+    def aggregate(self, pipeline):
+        expected_pipeline = [
+            {"$unwind": "$schedule_details.days"},
+            {"$group": {"_id": "$schedule_details.days"}},
+            {"$sort": {"_id": 1}}
+        ]
+
+        if pipeline != expected_pipeline:
+            return []
+
+        days = set()
+        for document in self._documents.values():
+            day_values = _get_nested_value(document, "schedule_details.days")
+            if isinstance(day_values, list):
+                days.update(day_values)
+
+        return [{"_id": day} for day in sorted(days)]
+
+# Connect to MongoDB or fallback to in-memory collections
+client = MongoClient('mongodb://localhost:27017/', serverSelectionTimeoutMS=2000)
+
+try:
+    client.admin.command('ping')
+    db = client['mergington_high']
+    activities_collection = db['activities']
+    teachers_collection = db['teachers']
+except ServerSelectionTimeoutError:
+    activities_collection = InMemoryCollection()
+    teachers_collection = InMemoryCollection()
 
 # Methods
 
